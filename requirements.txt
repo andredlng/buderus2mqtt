@@ -1,3 +1,0 @@
-iot-daemonize
-paho-mqtt
-pyserial

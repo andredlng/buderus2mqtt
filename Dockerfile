@@ -1,23 +1,12 @@
-FROM python:3.12-alpine as builder
-
-RUN set -eux; \
-        apk add --no-cache \
-                gcc \
-                libc-dev \
-                libffi-dev \
-                openssl-dev \
-                cargo
+FROM astral/uv:python3.12-alpine
 
 WORKDIR /app
 
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY pyproject.toml README.md LICENSE.md ./
+COPY src ./src
 
-FROM python:3.12-alpine
+RUN uv pip install --system --editable .
 
-WORKDIR /app
+ENV PYTHONUNBUFFERED=1
 
-COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
-COPY buderus2mqtt .
-
-CMD [ "python", "./buderus2mqtt" ]
+CMD ["buderus2mqtt"]

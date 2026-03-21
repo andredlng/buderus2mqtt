@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 #
 # buderus2mqtt - Buderus Logamatic 4000 serial to MQTT bridge
 #
@@ -18,7 +16,6 @@ import time
 import serial
 
 import iot_daemonize
-import iot_daemonize.configuration as configuration
 
 
 logger = logging.getLogger('buderus2mqtt')
@@ -64,7 +61,7 @@ def reclen(name: str, expected: int, actual: int) -> bool:
 RECORD_HANDLERS: dict[int, callable] = {}
 
 
-def _init_record_handlers():
+def init_record_handlers():
     RECORD_HANDLERS.update({
         0x80: lambda r: decode_zone(1, r),
         0x81: lambda r: decode_zone(2, r),
@@ -139,7 +136,7 @@ def decode_zone(zone: int, record: bytes):
 
     report_error(f'Heizkreis {zone}', '; '.join(err))
 
-    ri_str = '----' if ri == 27.5 else f'{ri:.1f}'  # 55/2 = 27.5 = invalid
+    ri_str = '----' if ri == 55.0 else f'{ri:.1f}'  # rb[5] == 110 -> 55.0 = invalid sensor
     logger.info('Heizkreis %d: Raum Soll/Ist = %.1f/%s C, Vorlauf Soll/Ist = %d/%d  %s  %s',
                 zone, rs, ri_str, vs, vi, ' '.join(st), '; '.join(err))
     logger.info('             Pumpe %d%%  Stellglied %d%%  Ein-Opt. %d min  Aus-Opt. %d min',
@@ -153,7 +150,7 @@ def decode_zone(zone: int, record: bytes):
             f'hk{zone}_v': vi,
             f'hk{zone}_vs': vs,
         }
-        if ri != 27.5:  # 55/2 = invalid sensor
+        if ri != 55.0:  # rb[5] == 110 -> 55.0 = invalid sensor
             data[f'hk{zone}'] = ri
             data[f'hk{zone}_pu'] = pu
         send_data(data)
@@ -519,62 +516,3 @@ def serial_loop(stop):
 
     ser.close()
     logger.info('Serial port closed')
-
-
-# --- Main ---
-
-def main():
-    global config
-
-    config = configuration.MqttDaemonConfiguration(
-        program='buderus2mqtt',
-        description='Read Buderus Logamatic 4000 serial data and publish to MQTT'
-    )
-    config.add_config_arg('iot_daemonize.mqtt_clientid',
-                          flags='--iot_daemonize.mqtt_clientid', default='buderus2mqtt',
-                          help='The clientid to send to the MQTT server. Default is buderus2mqtt.')
-    config.add_config_arg('mqtt_topic',
-                          flags='--mqtt_topic', default='heating',
-                          help='The MQTT topic root. Default is heating.')
-    config.add_config_arg('serial_port',
-                          flags='--serial_port', default='/dev/ttyAMA0',
-                          help='The serial port device. Default is /dev/ttyAMA0.')
-    config.add_config_arg('serial_baud',
-                          flags='--serial_baud', default=1200, type=int,
-                          help='The serial baud rate. Default is 1200.')
-    config.add_config_arg('smtp_host',
-                          flags='--smtp_host', default='',
-                          help='SMTP server for error email notifications. Empty to disable.')
-    config.add_config_arg('smtp_port',
-                          flags='--smtp_port', default=587, type=int,
-                          help='SMTP port. Default is 587.')
-    config.add_config_arg('smtp_user',
-                          flags='--smtp_user', default='',
-                          help='SMTP username for authentication.')
-    config.add_config_arg('smtp_password',
-                          flags='--smtp_password', default='',
-                          help='SMTP password for authentication.')
-    config.add_config_arg('smtp_from',
-                          flags='--smtp_from', default='',
-                          help='Email sender address.')
-    config.add_config_arg('smtp_to',
-                          flags='--smtp_to', default='',
-                          help='Email recipient address.')
-    config.add_config_arg('mail_repeat_seconds',
-                          flags='--mail_repeat_seconds', default=14400, type=int,
-                          help='Repeat error emails after this many seconds. Default is 14400 (4 hours).')
-    config.add_config_arg('config',
-                          flags=['-c', '--config'], default='/etc/buderus2mqtt.conf',
-                          help='The path to the config file. Default is /etc/buderus2mqtt.conf.')
-    config.parse_args()
-    config.parse_config(config.config)
-
-    _init_record_handlers()
-
-    iot_daemonize.init(config, mqtt=True, http=False, daemonize=True)
-    iot_daemonize.daemon.add_task(serial_loop)
-    iot_daemonize.run()
-
-
-if __name__ == '__main__':
-    main()

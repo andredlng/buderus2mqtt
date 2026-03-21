@@ -1,3 +1,5 @@
 *
-!buderus2mqtt
-!requirements.txt
+!src/
+!pyproject.toml
+!README.md
+!LICENSE.md

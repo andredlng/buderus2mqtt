@@ -1,5 +1,3 @@
 #!/bin/sh
 
-. venv/bin/activate
-
-exec /usr/bin/env python buderus2mqtt
+exec uv run buderus2mqtt "$@"

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "buderus2mqtt"
+version = "0.1.0"
+description = "Bridge Buderus Logamatic 4000 serial data to MQTT."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE.md" }
+dependencies = [
+    "iot-daemonize",
+    "pyserial",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+buderus2mqtt = "buderus2mqtt.__main__:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
