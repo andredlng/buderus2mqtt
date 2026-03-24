@@ -9,12 +9,5 @@
     "mqtt_tls": "false",
     "serial_port": "/dev/ttyAMA0",
     "serial_baud": 1200,
-    "smtp_host": "",
-    "smtp_port": 587,
-    "smtp_user": "",
-    "smtp_password": "",
-    "smtp_from": "",
-    "smtp_to": "",
-    "mail_repeat_seconds": 14400,
     "verbose": "false"
 }

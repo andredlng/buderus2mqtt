@@ -31,29 +31,13 @@ def create_config():
     cfg.add_config_arg('serial_baud', flags='--serial_baud', default=1200,
                        help='The serial baud rate. Default is 1200.')
 
-    # SMTP settings
-    cfg.add_config_arg('smtp_host', flags='--smtp_host', default='',
-                       help='SMTP server for error email notifications. Empty to disable.')
-    cfg.add_config_arg('smtp_port', flags='--smtp_port', default=587,
-                       help='SMTP port. Default is 587.')
-    cfg.add_config_arg('smtp_user', flags='--smtp_user', default='',
-                       help='SMTP username for authentication.')
-    cfg.add_config_arg('smtp_password', flags='--smtp_password', default='',
-                       help='SMTP password for authentication.')
-    cfg.add_config_arg('smtp_from', flags='--smtp_from', default='',
-                       help='Email sender address.')
-    cfg.add_config_arg('smtp_to', flags='--smtp_to', default='',
-                       help='Email recipient address.')
-    cfg.add_config_arg('mail_repeat_seconds', flags='--mail_repeat_seconds', default=14400,
-                       help='Repeat error emails after this many seconds. Default is 14400 (4 hours).')
-
     cfg.parse_args()
     return cfg
 
 
 def coerce_config_types(cfg):
     """Convert string config values to proper types after parsing."""
-    int_keys = ['serial_baud', 'smtp_port', 'mail_repeat_seconds']
+    int_keys = ['serial_baud']
 
     for key in int_keys:
         val = getattr(cfg, key, None)

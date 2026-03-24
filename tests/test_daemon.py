@@ -1,4 +1,3 @@
-import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -13,10 +12,8 @@ from buderus2mqtt.daemon import (
     decode_config,
     decode_energy,
     decode_solar,
-    report_error,
     init_record_handlers,
     run_counters,
-    error_states,
     send_data,
 )
 import buderus2mqtt.daemon as daemon
@@ -26,15 +23,11 @@ import buderus2mqtt.daemon as daemon
 def reset_state():
     """Reset global state between tests."""
     run_counters.clear()
-    error_states.clear()
     # Provide a mock config
     daemon.config = MagicMock()
     daemon.config.mqtt_topic = 'heating'
-    daemon.config.smtp_host = ''
-    daemon.config.mail_repeat_seconds = 14400
     yield
     run_counters.clear()
-    error_states.clear()
 
 
 # --- Protocol helpers ---
@@ -283,8 +276,7 @@ def make_config_record(at1=10, at2=8):
 
 class TestDecodeConfig:
     @patch('buderus2mqtt.daemon.send_data')
-    @patch('buderus2mqtt.daemon.send_mail')
-    def test_basic_publish(self, mock_mail, mock_send):
+    def test_basic_publish(self, mock_send):
         """Config publishes on run % 5 == 0."""
         record = make_config_record(at1=10, at2=8)
         decode_config(record)  # run 0, publishes
@@ -294,8 +286,7 @@ class TestDecodeConfig:
         assert data['aussen_d'] == 8
 
     @patch('buderus2mqtt.daemon.send_data')
-    @patch('buderus2mqtt.daemon.send_mail')
-    def test_negative_temperature(self, mock_mail, mock_send):
+    def test_negative_temperature(self, mock_send):
         """Negative temps via signed_byte."""
         record = make_config_record(at1=246, at2=248)  # -10, -8
         decode_config(record)
@@ -305,34 +296,21 @@ class TestDecodeConfig:
         assert data['aussen_d'] == -8
 
     @patch('buderus2mqtt.daemon.send_data')
-    @patch('buderus2mqtt.daemon.send_mail')
-    def test_sensor_fault_no_publish(self, mock_mail, mock_send):
+    def test_sensor_fault_no_publish(self, mock_send):
         """rb[0]=110 signals sensor fault, skips publishing."""
         record = make_config_record(at1=110, at2=8)
         decode_config(record)
         assert mock_send.call_count == 0
 
     @patch('buderus2mqtt.daemon.send_data')
-    @patch('buderus2mqtt.daemon.send_mail')
-    def test_plausibility_rejection(self, mock_mail, mock_send):
+    def test_plausibility_rejection(self, mock_send):
         """Temps outside -40..50 range are rejected."""
         record = make_config_record(at1=60, at2=8)  # 60 > 50
         decode_config(record)
         assert mock_send.call_count == 0
 
     @patch('buderus2mqtt.daemon.send_data')
-    @patch('buderus2mqtt.daemon.send_mail')
-    def test_startup_email_on_run1(self, mock_mail, mock_send):
-        """Sends startup email on second call (run == 1)."""
-        record = make_config_record(at1=10, at2=8)
-        decode_config(record)  # run 0
-        decode_config(record)  # run 1 -> startup mail
-        assert mock_mail.call_count == 1
-        assert 'Monitoring gestartet' in mock_mail.call_args[0][0]
-
-    @patch('buderus2mqtt.daemon.send_data')
-    @patch('buderus2mqtt.daemon.send_mail')
-    def test_publish_frequency(self, mock_mail, mock_send):
+    def test_publish_frequency(self, mock_send):
         """Only publishes every 5th run."""
         record = make_config_record(at1=10, at2=8)
         for _ in range(10):
@@ -420,53 +398,68 @@ class TestDecodeSolar:
         assert mock_send.call_count == 5
 
 
-# --- Error tracking ---
+# --- Error publishing via MQTT ---
 
 
-class TestReportError:
-    @patch('buderus2mqtt.daemon.send_mail')
-    def test_new_error_sends_mail(self, mock_mail):
-        report_error('Kessel', 'BRENNERSTOERUNG')
-        assert mock_mail.call_count == 1
-        assert 'FEHLER: Kessel' in mock_mail.call_args[0][0]
-        assert 'Neuer Fehler' in mock_mail.call_args[0][1]
+class TestErrorPublishing:
+    @patch('buderus2mqtt.daemon.send_data')
+    def test_zone_error_published(self, mock_send):
+        """Zone error flags are published as hk{n}_err."""
+        record = make_zone_record(rb1=0x04)  # Fernbedienungs-Kommunikation gestoert
+        decode_zone(2, record)  # run 0, publishes
+        data = mock_send.call_args[0][0]
+        assert 'Fernbedienungs-Kommunikation gestoert' in data['hk2_err']
 
-    @patch('buderus2mqtt.daemon.send_mail')
-    def test_same_error_within_repeat_no_mail(self, mock_mail):
-        report_error('Kessel', 'BRENNERSTOERUNG')
-        mock_mail.reset_mock()
-        report_error('Kessel', 'BRENNERSTOERUNG')
-        assert mock_mail.call_count == 0
+    @patch('buderus2mqtt.daemon.send_data')
+    def test_zone_no_error_empty_string(self, mock_send):
+        """No error flags -> empty string."""
+        record = make_zone_record()
+        decode_zone(2, record)  # run 0, publishes
+        data = mock_send.call_args[0][0]
+        assert data['hk2_err'] == ''
 
-    @patch('buderus2mqtt.daemon.send_mail')
-    def test_same_error_after_repeat_sends_reminder(self, mock_mail):
-        report_error('Kessel', 'BRENNERSTOERUNG')
-        # Simulate time passing beyond repeat interval
-        error_states['Kessel']['lasttime'] = time.time() - 15000
-        mock_mail.reset_mock()
-        report_error('Kessel', 'BRENNERSTOERUNG')
-        assert mock_mail.call_count == 1
-        assert 'ERINNERUNG' in mock_mail.call_args[0][0]
+    @patch('buderus2mqtt.daemon.send_data')
+    def test_boiler_error_published(self, mock_send):
+        """Boiler error flags are published as kessel_err."""
+        rec = make_boiler_record()
+        rec_list = list(rec)
+        rec_list[6] = 0x01  # BRENNERSTOERUNG
+        record = bytes(rec_list)
+        decode_boiler(record)  # run 0, publishes
+        data = mock_send.call_args[0][0]
+        assert 'BRENNERSTOERUNG' in data['kessel_err']
 
-    @patch('buderus2mqtt.daemon.send_mail')
-    def test_error_cleared_sends_gutmeldung(self, mock_mail):
-        report_error('Kessel', 'BRENNERSTOERUNG')
-        mock_mail.reset_mock()
-        report_error('Kessel', '')
-        assert mock_mail.call_count == 1
-        assert 'GUTMELDUNG' in mock_mail.call_args[0][0]
+    @patch('buderus2mqtt.daemon.send_data')
+    def test_water_error_published(self, mock_send):
+        """Water error flags are published as ww_err."""
+        rec = make_water_record(rb0=0x10)  # Fehler bei Desinfektion
+        decode_water(rec)  # run 0, publishes
+        data = mock_send.call_args[0][0]
+        assert 'Fehler bei Desinfektion' in data['ww_err']
 
-    @patch('buderus2mqtt.daemon.send_mail')
-    def test_no_error_then_no_error_no_mail(self, mock_mail):
-        report_error('Kessel', '')
-        assert mock_mail.call_count == 0
+    @patch('buderus2mqtt.daemon.send_data')
+    def test_config_error_published(self, mock_send):
+        """Sensor fault is published as aussen_err."""
+        record = make_config_record(at1=110, at2=8)
+        # Sensor fault skips publishing data, so no send_data call
+        decode_config(record)
+        assert mock_send.call_count == 0
 
-    @patch('buderus2mqtt.daemon.send_mail')
-    def test_different_error_sends_new_mail(self, mock_mail):
-        report_error('Kessel', 'BRENNERSTOERUNG')
-        mock_mail.reset_mock()
-        report_error('Kessel', 'KESSELFUEHLER')
-        assert mock_mail.call_count == 1
+    @patch('buderus2mqtt.daemon.send_data')
+    def test_config_no_error_published(self, mock_send):
+        """Normal config publishes empty aussen_err."""
+        record = make_config_record(at1=10, at2=8)
+        decode_config(record)  # run 0, publishes
+        data = mock_send.call_args[0][0]
+        assert data['aussen_err'] == ''
+
+    @patch('buderus2mqtt.daemon.send_data')
+    def test_solar_error_published(self, mock_send):
+        """Solar error flags are published as sol_err."""
+        record = make_solar_record(rb0=0x08)  # Collector Temp Limit
+        decode_solar(record)
+        data = mock_send.call_args[0][0]
+        assert 'Collector Temp Limit' in data['sol_err']
 
 
 # --- Record handler registration ---

@@ -40,13 +40,6 @@ cp buderus2mqtt.conf.example buderus2mqtt.conf
 | `mqtt_topic` | `heating` | MQTT topic root |
 | `serial_port` | `/dev/ttyAMA0` | Serial port device |
 | `serial_baud` | `1200` | Serial baud rate |
-| `smtp_host` | | SMTP server (empty to disable email) |
-| `smtp_port` | `587` | SMTP port |
-| `smtp_user` | | SMTP username |
-| `smtp_password` | | SMTP password |
-| `smtp_from` | | Email sender address |
-| `smtp_to` | | Email recipient address |
-| `mail_repeat_seconds` | `14400` | Repeat error emails interval (seconds) |
 | `verbose` | `false` | Enable verbose logging |
 
 ## MQTT Topics
@@ -61,23 +54,28 @@ All values are published under `{mqtt_topic}/{key}`:
 | `hk{1-9}_v` | Zone flow temperature |
 | `hk{1-9}_vs` | Zone flow setpoint |
 | `hk{1-9}_pu` | Zone pump |
+| `hk{1-9}_err` | Zone error |
 | `ww` | Hot water temperature |
 | `ww_s` | Hot water setpoint |
 | `ww_l` | Hot water loading |
 | `ww_laden` | Charge pump |
 | `ww_zirk` | Circulation pump |
+| `ww_err` | Hot water error |
 | `kessel` | Boiler temperature |
 | `kessel_s` | Boiler setpoint |
 | `brenner` | Burner status |
 | `k_ein` | Boiler on threshold |
 | `k_aus` | Boiler off threshold |
+| `kessel_err` | Boiler error |
 | `aussen` | Outdoor temperature |
 | `aussen_d` | Damped outdoor temperature |
+| `aussen_err` | Outdoor sensor error |
 | `energie` | Energy pulse counter |
 | `sol_coll` | Solar collector temperature |
 | `sol_t1` | Solar tank 1 temperature |
 | `sol_t2` | Solar tank 2 temperature |
 | `sol_pump` | Solar pump status |
+| `sol_err` | Solar error |
 
 ## License
 

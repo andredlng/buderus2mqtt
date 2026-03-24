@@ -8,10 +8,7 @@
 # Python port (c) 2026
 #
 
-import email.message
 import logging
-import smtplib
-import time
 
 import serial
 
@@ -22,7 +19,6 @@ logger = logging.getLogger('buderus2mqtt')
 
 config = None
 run_counters: dict[str, int] = {}
-error_states: dict[str, dict] = {}
 
 
 # --- Protocol helpers ---
@@ -134,8 +130,6 @@ def decode_zone(zone: int, record: bytes):
     if rb[10] & 0x20: err.append('Betriebsartschalter: AUS')
     if rb[10] & 0x40: err.append('Betriebsartschalter: MANUELL')
 
-    report_error(f'Heizkreis {zone}', '; '.join(err))
-
     ri_str = '----' if ri == 55.0 else f'{ri:.1f}'  # rb[5] == 110 -> 55.0 = invalid sensor
     logger.info('Heizkreis %d: Raum Soll/Ist = %.1f/%s C, Vorlauf Soll/Ist = %d/%d  %s  %s',
                 zone, rs, ri_str, vs, vi, ' '.join(st), '; '.join(err))
@@ -149,6 +143,7 @@ def decode_zone(zone: int, record: bytes):
             f'hk{zone}_sg': sg,
             f'hk{zone}_v': vi,
             f'hk{zone}_vs': vs,
+            f'hk{zone}_err': '; '.join(err),
         }
         if ri != 55.0:  # rb[5] == 110 -> 55.0 = invalid sensor
             data[f'hk{zone}'] = ri
@@ -197,8 +192,6 @@ def decode_water(record: bytes):
     if rb[6] & 0x40: err.append('Betriebsartschalter: MANUELL')
     if rb[6] & 0x02: err.append('Externe Fehlermeldung')  # rb[7] & 0x01 in original, keyed off w3
 
-    report_error('Warmwasser', '; '.join(err))
-
     la = 1 if rb[1] & 0x01 else 0
     p0 = 1 if rb[5] & 0x01 else 0
     p1 = 1 if rb[5] & 0x02 else 0
@@ -206,7 +199,8 @@ def decode_water(record: bytes):
     logger.info('Warmwasser:  Soll/Ist = %s/%s C  %s %s', ws, wi, ' '.join(st), '; '.join(err))
 
     if run % 2 == 0:
-        send_data({'ww': wi, 'ww_s': ws, 'ww_l': la, 'ww_laden': p0, 'ww_zirk': p1})
+        send_data({'ww': wi, 'ww_s': ws, 'ww_l': la, 'ww_laden': p0, 'ww_zirk': p1,
+                   'ww_err': '; '.join(err)})
 
 
 def decode_errlog(record: bytes):
@@ -260,14 +254,13 @@ def decode_boiler(record: bytes):
     if rb[34] & 0x08: st.append('Brenner=1')
     if rb[34] & 0x10: st.append('Brenner=2')
 
-    report_error('Kessel', '; '.join(err))
-
     err_str = f'FEHLER: {"; ".join(err)}' if err else ''
     logger.info('Kessel:      Soll/Ist = %d/%d C  Ein/Aus = %d/%d C  Brenner = %d  %s %s',
                 ks, ki, k1, k0, br, ' '.join(st), err_str)
 
     if run % 2 == 0:
-        send_data({'kessel': ki, 'kessel_s': ks, 'brenner': br, 'k_ein': k1, 'k_aus': k0})
+        send_data({'kessel': ki, 'kessel_s': ks, 'brenner': br, 'k_ein': k1, 'k_aus': k0,
+                   'kessel_err': '; '.join(err)})
 
 
 def decode_config(record: bytes):
@@ -286,8 +279,6 @@ def decode_config(record: bytes):
         at1 = None
         err = 'Aussentemperatur-Sensor defekt'
 
-    report_error('Aussentemperatur', err)
-
     if at1 is not None and (at1 < -40 or at1 > 50):
         return
     if at2 < -40 or at2 > 50:
@@ -298,11 +289,8 @@ def decode_config(record: bytes):
     else:
         logger.info('Aussen:      -- C (Gedaempft %d C)  %s', at2, err)
 
-    if run == 1:
-        send_mail('Monitoring gestartet', f'Aussentemperatur {at1} C')
-
     if run % 5 == 0 and at1 is not None:
-        send_data({'aussen': at1, 'aussen_d': at2})
+        send_data({'aussen': at1, 'aussen_d': at2, 'aussen_err': err})
 
 
 def decode_energy(record: bytes):
@@ -355,85 +343,22 @@ def decode_solar(record: bytes):
     if rb[9] & 0x08: st.append('T2 High Flow')
     if rb[9] & 0x10: st.append('T2 Manual')
 
-    report_error('Solar', '; '.join(err))
-
     err_str = f'ERROR: {"; ".join(err)}' if err else ''
     logger.info('Solar: Collector=%.1f C  Pump=%d  Tank1=%d  Tank2=%d  %s %s',
                 ct, pu, t1, t2, ' '.join(st), err_str)
 
-    send_data({'sol_coll': ct, 'sol_t1': t1, 'sol_t2': t2, 'sol_pump': pu})
+    send_data({'sol_coll': ct, 'sol_t1': t1, 'sol_t2': t2, 'sol_pump': pu,
+               'sol_err': '; '.join(err)})
 
 
 # --- Publishing ---
 
-def send_data(params: dict[str, int | float]):
+def send_data(params: dict[str, int | float | str]):
     topic_root = config.mqtt_topic
     for key, value in params.items():
         topic = f'{topic_root}/{key}'
         iot_daemonize.mqtt_client.publish(topic, value)
     logger.debug('[DATA] %s', ' '.join(f'{k}:{v}' for k, v in params.items()))
-
-
-# --- Error tracking and email ---
-
-def report_error(subject: str, message: str):
-    state = error_states.get(subject, {})
-    last_err = state.get('message')
-    first_time = state.get('time')
-    last_time = state.get('lasttime')
-
-    if not message:
-        if last_err:
-            send_mail(
-                f'GUTMELDUNG: {subject}',
-                f'Der seit {time.ctime(first_time)} anstehende Fehler wurde behoben!'
-            )
-            logger.info('ReportError: END of error %s, since %s', subject, time.ctime(first_time))
-        error_states.pop(subject, None)
-        return
-
-    if last_err == message and last_time and (time.time() - last_time) < config.mail_repeat_seconds:
-        logger.debug('ReportError: same error as before, last reported %s', time.ctime(last_time))
-        return
-
-    state['message'] = message
-    if not first_time:
-        state['time'] = time.time()
-    state['lasttime'] = time.time()
-    error_states[subject] = state
-
-    if first_time:
-        send_mail(
-            f'FEHLER: {subject} (ERINNERUNG)',
-            f'{message}\nFehler steht an seit {time.ctime(first_time)}\n'
-        )
-    else:
-        send_mail(f'FEHLER: {subject}', f'{message}\n(Neuer Fehler)\n')
-
-
-def send_mail(subject: str, message: str):
-    if not config.smtp_host:
-        logger.debug('SendMail: skipped (no smtp_host configured) - %s: %s', subject, message)
-        return
-
-    logger.info('SendMail: %s - %s', subject, message)
-
-    try:
-        msg = email.message.EmailMessage()
-        msg['From'] = config.smtp_from
-        msg['To'] = config.smtp_to
-        msg['Subject'] = subject
-        msg['X-Priority'] = '1 (Highest)'
-        msg['X-MSMail-Priority'] = 'High'
-        msg.set_content(message)
-
-        with smtplib.SMTP(config.smtp_host, config.smtp_port, timeout=10) as smtp:
-            smtp.starttls()
-            if config.smtp_user:
-                smtp.login(config.smtp_user, config.smtp_password)
-            smtp.send_message(msg)
-    except Exception:
-        logger.exception('SendMail failed')
 
 
 # --- Serial loop (daemon task) ---
