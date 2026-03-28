@@ -9,6 +9,7 @@
 #
 
 import logging
+import subprocess
 import time
 
 import serial
@@ -371,11 +372,25 @@ def serial_loop(stop):
         logger.exception('serial_loop crashed with unhandled exception')
 
 
+MAX_BUF = 2048
+
+
 def _serial_loop(stop):
-    logger.info('Opening serial port %s at %d bps', config.serial_port, config.serial_baud)
+    port = config.serial_port
+    baud = config.serial_baud
+
+    # Pre-configure terminal like the original Perl script
+    try:
+        subprocess.run(['stty', '-F', port, str(baud), 'cs8', '-cstopb', '-parity', 'raw', 'pass8'],
+                       check=True, capture_output=True)
+        logger.info('stty configured %s at %d bps', port, baud)
+    except (FileNotFoundError, subprocess.CalledProcessError) as e:
+        logger.warning('stty pre-configuration failed: %s', e)
+
+    logger.info('Opening serial port %s at %d bps', port, baud)
     ser = serial.Serial(
-        port=config.serial_port,
-        baudrate=config.serial_baud,
+        port=port,
+        baudrate=baud,
         bytesize=serial.EIGHTBITS,
         parity=serial.PARITY_NONE,
         stopbits=serial.STOPBITS_ONE,
@@ -412,6 +427,10 @@ def _serial_loop(stop):
                 logger.info('serial hex sample (first %d bytes of buf): %s',
                             min(200, len(buf)), buf[:200].hex())
                 hex_dumped = True
+
+            # Cap buffer to prevent unbounded growth from marker-less data
+            if len(buf) > MAX_BUF:
+                buf = buf[-MAX_BUF:]
 
             while True:
                 # Find block end marker 0xAF 0x82 or 0xAF 0x02
