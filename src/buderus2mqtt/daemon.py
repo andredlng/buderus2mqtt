@@ -387,21 +387,31 @@ def _serial_loop(stop):
         lastrec = 0
         recbuf = bytearray()
         last_heartbeat = time.monotonic()
-        stats = {'bytes': 0, 'blocks': 0, 'records': 0}
+        stats = {'bytes': 0, 'blocks': 0, 'records': 0, 'checksum_errors': 0,
+                 'markers': 0, 'short_discards': 0}
+        hex_dumped = False
 
         while not stop():
             chunk = ser.read(132)
 
             now = time.monotonic()
             if now - last_heartbeat >= 60:
-                logger.info('serial_loop heartbeat: %d bytes received, %d blocks, %d records decoded',
-                            stats['bytes'], stats['blocks'], stats['records'])
+                logger.info('serial_loop heartbeat: %d bytes rx, %d markers, %d blocks ok, '
+                            '%d checksum errors, %d short discards, %d records, buf=%d',
+                            stats['bytes'], stats['markers'], stats['blocks'],
+                            stats['checksum_errors'], stats['short_discards'],
+                            stats['records'], len(buf))
                 last_heartbeat = now
 
             if not chunk:
                 continue
             stats['bytes'] += len(chunk)
             buf.extend(chunk)
+
+            if not hex_dumped and stats['bytes'] >= 200:
+                logger.info('serial hex sample (first %d bytes of buf): %s',
+                            min(200, len(buf)), buf[:200].hex())
+                hex_dumped = True
 
             while True:
                 # Find block end marker 0xAF 0x82 or 0xAF 0x02
@@ -422,6 +432,8 @@ def _serial_loop(stop):
                 if be < 0:
                     break
 
+                stats['markers'] += 1
+
                 if be >= 9:
                     subblock = bytes(buf[be - 9:be])
                     buf = buf[be + 1:]
@@ -433,6 +445,7 @@ def _serial_loop(stop):
                     cs = checksum(block)
                     if cs != block[8]:
                         logger.warning('Checksum error: %s rx=%02x calc=%02x', subblock.hex(), block[8], cs)
+                        stats['checksum_errors'] += 1
                         continue
 
                     recnum = block[0]
@@ -454,6 +467,7 @@ def _serial_loop(stop):
                     lastrec = recnum
                 else:
                     # Not enough data before marker, discard
+                    stats['short_discards'] += 1
                     buf = buf[be + 2:]
 
         # Decode any remaining record

@@ -535,4 +535,5 @@ class TestSerialLoopObservability:
         with caplog.at_level(logging.INFO):
             serial_loop(stop)
 
-        assert 'serial_loop heartbeat: 0 bytes received, 0 blocks, 0 records decoded' in caplog.text
+        assert 'serial_loop heartbeat:' in caplog.text
+        assert '0 bytes rx' in caplog.text
