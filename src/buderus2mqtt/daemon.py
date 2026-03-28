@@ -9,6 +9,7 @@
 #
 
 import logging
+import time
 
 import serial
 
@@ -364,6 +365,13 @@ def send_data(params: dict[str, int | float | str]):
 # --- Serial loop (daemon task) ---
 
 def serial_loop(stop):
+    try:
+        _serial_loop(stop)
+    except Exception:
+        logger.exception('serial_loop crashed with unhandled exception')
+
+
+def _serial_loop(stop):
     logger.info('Opening serial port %s at %d bps', config.serial_port, config.serial_baud)
     ser = serial.Serial(
         port=config.serial_port,
@@ -374,70 +382,83 @@ def serial_loop(stop):
         timeout=0.5,
     )
 
-    buf = bytearray()
-    lastrec = 0
-    recbuf = bytearray()
+    try:
+        buf = bytearray()
+        lastrec = 0
+        recbuf = bytearray()
+        last_heartbeat = time.monotonic()
+        stats = {'bytes': 0, 'blocks': 0, 'records': 0}
 
-    while not stop():
-        chunk = ser.read(132)
-        if not chunk:
-            continue
-        buf.extend(chunk)
+        while not stop():
+            chunk = ser.read(132)
 
-        while True:
-            # Find block end marker 0xAF 0x82 or 0xAF 0x02
-            be = buf.find(b'\xaf\x82')
-            be2 = buf.find(b'\xaf\x02')
-            if be < 0 and be2 >= 0:
-                be = be2
-            elif be >= 0 and be2 >= 0:
-                be = min(be, be2)
-            alt_marker = (be == be2)
+            now = time.monotonic()
+            if now - last_heartbeat >= 60:
+                logger.info('serial_loop heartbeat: %d bytes received, %d blocks, %d records decoded',
+                            stats['bytes'], stats['blocks'], stats['records'])
+                last_heartbeat = now
 
-            # Handle protocol exception: 0x89 0x18 with extra bytes
-            be3 = buf.find(b'\x89\x18')
-            if be in (9, 10) and be3 == 0:
-                buf = buf[be3 + 2:]
+            if not chunk:
                 continue
+            stats['bytes'] += len(chunk)
+            buf.extend(chunk)
 
-            if be < 0:
-                break
+            while True:
+                # Find block end marker 0xAF 0x82 or 0xAF 0x02
+                be = buf.find(b'\xaf\x82')
+                be2 = buf.find(b'\xaf\x02')
+                if be < 0 and be2 >= 0:
+                    be = be2
+                elif be >= 0 and be2 >= 0:
+                    be = min(be, be2)
+                alt_marker = (be == be2)
 
-            if be >= 9:
-                subblock = bytes(buf[be - 9:be])
-                buf = buf[be + 1:]
-
-                block = list(subblock)
-                payload = subblock[2:8]
-
-                # Verify checksum
-                cs = checksum(block)
-                if cs != block[8]:
-                    logger.warning('Checksum error: %s rx=%02x calc=%02x', subblock.hex(), block[8], cs)
+                # Handle protocol exception: 0x89 0x18 with extra bytes
+                be3 = buf.find(b'\x89\x18')
+                if be in (9, 10) and be3 == 0:
+                    buf = buf[be3 + 2:]
                     continue
 
-                recnum = block[0]
-                payofs = block[1]
+                if be < 0:
+                    break
 
-                logger.debug('Block 0x%02x:%02d = %s', recnum, payofs, subblock.hex())
+                if be >= 9:
+                    subblock = bytes(buf[be - 9:be])
+                    buf = buf[be + 1:]
 
-                # New record or alt marker or 0x89/0x18 exception
-                if payofs == 0 or alt_marker or (recnum == 0x89 and payofs == 0x18):
-                    if lastrec and len(recbuf):
-                        decode(lastrec, bytes(recbuf))
-                    recbuf = bytearray(payload)
+                    block = list(subblock)
+                    payload = subblock[2:8]
+
+                    # Verify checksum
+                    cs = checksum(block)
+                    if cs != block[8]:
+                        logger.warning('Checksum error: %s rx=%02x calc=%02x', subblock.hex(), block[8], cs)
+                        continue
+
+                    recnum = block[0]
+                    payofs = block[1]
+
+                    logger.debug('Block 0x%02x:%02d = %s', recnum, payofs, subblock.hex())
+                    stats['blocks'] += 1
+
+                    # New record or alt marker or 0x89/0x18 exception
+                    if payofs == 0 or alt_marker or (recnum == 0x89 and payofs == 0x18):
+                        if lastrec and len(recbuf):
+                            decode(lastrec, bytes(recbuf))
+                            stats['records'] += 1
+                        recbuf = bytearray(payload)
+                    else:
+                        if len(recbuf):
+                            recbuf.extend(payload)
+
+                    lastrec = recnum
                 else:
-                    if len(recbuf):
-                        recbuf.extend(payload)
+                    # Not enough data before marker, discard
+                    buf = buf[be + 2:]
 
-                lastrec = recnum
-            else:
-                # Not enough data before marker, discard
-                buf = buf[be + 2:]
-
-    # Decode any remaining record
-    if lastrec and len(recbuf):
-        decode(lastrec, bytes(recbuf))
-
-    ser.close()
-    logger.info('Serial port closed')
+        # Decode any remaining record
+        if lastrec and len(recbuf):
+            decode(lastrec, bytes(recbuf))
+    finally:
+        ser.close()
+        logger.info('Serial port closed')

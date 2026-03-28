@@ -1,6 +1,8 @@
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
+import serial
 
 from buderus2mqtt.daemon import (
     checksum,
@@ -15,6 +17,7 @@ from buderus2mqtt.daemon import (
     init_record_handlers,
     run_counters,
     send_data,
+    serial_loop,
 )
 import buderus2mqtt.daemon as daemon
 
@@ -476,3 +479,60 @@ class TestRecordHandlers:
         assert 0x89 in RECORD_HANDLERS  # config
         assert 0x9B in RECORD_HANDLERS  # energy
         assert 0x9E in RECORD_HANDLERS  # solar
+
+
+# --- Serial loop observability ---
+
+
+class TestSerialLoopObservability:
+    @patch('buderus2mqtt.daemon.serial.Serial')
+    def test_exception_on_open_is_logged(self, mock_serial_cls, caplog):
+        """If serial port open fails, exception is logged, not propagated."""
+        mock_serial_cls.side_effect = serial.SerialException('device not found')
+        daemon.config.serial_port = '/dev/ttyTEST'
+        daemon.config.serial_baud = 1200
+
+        serial_loop(lambda: False)  # should NOT raise
+
+        assert 'serial_loop crashed with unhandled exception' in caplog.text
+        assert 'device not found' in caplog.text
+
+    @patch('buderus2mqtt.daemon.serial.Serial')
+    def test_exception_during_read_is_logged(self, mock_serial_cls, caplog):
+        """If serial read fails, exception is logged and port is closed."""
+        mock_ser = MagicMock()
+        mock_serial_cls.return_value = mock_ser
+        mock_ser.read.side_effect = OSError('device disconnected')
+        daemon.config.serial_port = '/dev/ttyTEST'
+        daemon.config.serial_baud = 1200
+
+        serial_loop(lambda: False)  # should NOT raise
+
+        assert 'serial_loop crashed with unhandled exception' in caplog.text
+        assert 'device disconnected' in caplog.text
+        mock_ser.close.assert_called_once()
+
+    @patch('buderus2mqtt.daemon.time')
+    @patch('buderus2mqtt.daemon.serial.Serial')
+    def test_heartbeat_logged_after_60s(self, mock_serial_cls, mock_time, caplog):
+        """Heartbeat is logged after 60 seconds of loop running."""
+        mock_ser = MagicMock()
+        mock_serial_cls.return_value = mock_ser
+        mock_ser.read.return_value = b''
+
+        call_count = 0
+        def stop():
+            nonlocal call_count
+            call_count += 1
+            return call_count > 3
+
+        # monotonic() calls: init=0, loop iter 1=61, loop iter 2=62, loop iter 3=63
+        mock_time.monotonic.side_effect = [0, 61, 61, 62, 62, 63, 63]
+
+        daemon.config.serial_port = '/dev/ttyTEST'
+        daemon.config.serial_baud = 1200
+
+        with caplog.at_level(logging.INFO):
+            serial_loop(stop)
+
+        assert 'serial_loop heartbeat: 0 bytes received, 0 blocks, 0 records decoded' in caplog.text
