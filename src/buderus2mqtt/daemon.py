@@ -133,8 +133,9 @@ def decode_zone(zone: int, record: bytes):
     if rb[10] & 0x40: err.append('Betriebsartschalter: MANUELL')
 
     ri_str = '----' if ri == 55.0 else f'{ri:.1f}'  # rb[5] == 110 -> 55.0 = invalid sensor
-    logger.info('Heizkreis %d: Raum Soll/Ist = %.1f/%s C, Vorlauf Soll/Ist = %d/%d  %s  %s',
-                zone, rs, ri_str, vs, vi, ' '.join(st), '; '.join(err))
+    vi_str = '----' if vi == 110 else str(vi)  # rb[3] == 110 = no flow temp sensor
+    logger.info('Heizkreis %d: Raum Soll/Ist = %.1f/%s C, Vorlauf Soll/Ist = %d/%s  %s  %s',
+                zone, rs, ri_str, vs, vi_str, ' '.join(st), '; '.join(err))
     logger.info('             Pumpe %d%%  Stellglied %d%%  Ein-Opt. %d min  Aus-Opt. %d min',
                 pu, sg, o1, o0)
     logger.info('             Kennlinie: AT -10/0/+10 AT -> VL %d/%d/%d', k3, k2, k1)
@@ -143,10 +144,11 @@ def decode_zone(zone: int, record: bytes):
         data = {
             f'hk{zone}_s': rs,
             f'hk{zone}_sg': sg,
-            f'hk{zone}_v': vi,
             f'hk{zone}_vs': vs,
             f'hk{zone}_err': '; '.join(err),
         }
+        if vi != 110:  # rb[3] == 110 = no flow temp sensor
+            data[f'hk{zone}_v'] = vi
         if ri != 55.0:  # rb[5] == 110 -> 55.0 = invalid sensor
             data[f'hk{zone}'] = ri
             data[f'hk{zone}_pu'] = pu

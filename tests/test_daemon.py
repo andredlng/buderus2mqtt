@@ -167,6 +167,33 @@ class TestDecodeZone:
         assert 'hk2_vs' in data
 
     @patch('buderus2mqtt.daemon.send_data')
+    def test_invalid_flow_temp_sensor_skips_vi(self, mock_send):
+        """rb[3]=110 (vi=110) marks no flow temp sensor: hk_v not published."""
+        record = make_zone_record(vi=110)
+        decode_zone(2, record)  # run 0, publishes
+
+        data = mock_send.call_args[0][0]
+        assert 'hk2_v' not in data
+        assert 'hk2_vs' in data
+        assert 'hk2_s' in data
+        assert 'hk2_sg' in data
+
+    @patch('buderus2mqtt.daemon.send_data')
+    def test_both_sensors_invalid(self, mock_send):
+        """Both flow temp and room temp sensors invalid: minimal data published."""
+        record = make_zone_record(vi=110, ri_raw=110)
+        decode_zone(2, record)  # run 0, publishes
+
+        data = mock_send.call_args[0][0]
+        assert 'hk2_v' not in data
+        assert 'hk2' not in data
+        assert 'hk2_pu' not in data
+        assert 'hk2_s' in data
+        assert 'hk2_sg' in data
+        assert 'hk2_vs' in data
+        assert 'hk2_err' in data
+
+    @patch('buderus2mqtt.daemon.send_data')
     def test_valid_sensor_at_27_5_publishes(self, mock_send):
         """rb[5]=55 (ri=27.5) is a valid room temp, should publish hk and hk_pu."""
         record = make_zone_record(ri_raw=55)
