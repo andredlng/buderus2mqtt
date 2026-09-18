@@ -382,8 +382,8 @@ MAX_BUF = 2048
 def find_frame_marker(buf: bytearray) -> tuple[int, bool]:
     """Find the first 0xAF 0x82 / 0xAF 0x02 marker preceded by a checksum-valid frame.
 
-    Payload bytes can contain the marker sequence (e.g. runtime counters), so a
-    marker alone is not enough to delimit a frame. Returns (index of 0xAF or -1, alt_marker).
+    Validating the checksum keeps corrupted bytes before a marker from shifting
+    frame boundaries. Returns (index of 0xAF or -1, alt_marker).
     """
     for i in range(9, len(buf) - 1):
         if buf[i] != 0xAF or buf[i + 1] not in (0x82, 0x02):
@@ -402,6 +402,7 @@ class FrameParser:
         self.buf = bytearray()
         self.lastrec = 0
         self.recbuf = bytearray()
+        self.prev_af = False
         self.stats = {'blocks': 0, 'records': 0, 'discarded_bytes': 0}
 
     def _emit(self):
@@ -410,17 +411,19 @@ class FrameParser:
             self.stats['records'] += 1
 
     def feed(self, chunk: bytes):
-        self.buf.extend(chunk)
+        for b in chunk:
+            # The controller stuffs 0x00 after every 0xAF inside a frame, so data
+            # never looks like an 0xAF 0x82 / 0xAF 0x02 end marker.
+            if self.prev_af and b == 0x00:
+                self.prev_af = False
+                continue
+            self.prev_af = b == 0xAF
+            self.buf.append(b)
         if len(self.buf) > MAX_BUF:
             self.buf = self.buf[-MAX_BUF:]
 
         while True:
             be, alt_marker = find_frame_marker(self.buf)
-
-            # Handle protocol exception: 0x89 0x18 with extra bytes
-            if be in (9, 10) and self.buf.startswith(b'\x89\x18'):
-                self.buf = self.buf[2:]
-                continue
 
             if be < 0:
                 # A frame completed by future bytes needs at most the last 10 bytes here.
@@ -442,8 +445,7 @@ class FrameParser:
             logger.debug('Block 0x%02x:%02d = %s', recnum, payofs, subblock.hex())
             self.stats['blocks'] += 1
 
-            # New record or alt marker or 0x89/0x18 exception
-            if payofs == 0 or alt_marker or (recnum == 0x89 and payofs == 0x18):
+            if payofs == 0 or alt_marker:
                 self._emit()
                 self.recbuf = bytearray(payload)
             elif recnum != self.lastrec:

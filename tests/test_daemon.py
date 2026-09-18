@@ -592,6 +592,19 @@ def frame(recnum: int, payofs: int, payload: bytes) -> bytes:
     return block + bytes([checksum(list(block)), 0xAF, 0x82])
 
 
+def stuffed_frame(recnum: int, payofs: int, payload: bytes) -> bytes:
+    """Frame as sent by the controller: 0x00 inserted after every 0xAF before the marker."""
+    f = frame(recnum, payofs, payload)
+    return f[:9].replace(b'\xaf', b'\xaf\x00') + f[9:]
+
+
+# Boiler record captured from the bus: the 0x0c frame's checksum is 0xAF, sent as "af 00".
+CAPTURED_BOILER = bytes.fromhex(
+    '23441c2a1588' '000000ff0000' '173305000005'
+    '042736000000' '1e649c00446e' 'cd4300000400' '00006e6e6e00'
+)
+
+
 class TestFrameParser:
     def setup_method(self):
         self.records = []
@@ -612,7 +625,7 @@ class TestFrameParser:
         ]
 
     def test_marker_bytes_inside_payload(self):
-        """Payload bytes 0xAF 0x02 / 0xAF 0x82 (e.g. a frozen runtime counter) must not drop the record."""
+        """Marker-like bytes that don't end a checksum-valid frame must not split it (line noise)."""
         record = bytearray(range(1, 43))
         record[13:15] = b'\xaf\x02'
         record[26:28] = b'\xaf\x82'
@@ -658,3 +671,39 @@ class TestFrameParser:
         self.parser.flush()
 
         assert self.records == [(0x84, bytes(12))]
+
+    def _captured_boiler_stream(self) -> bytes:
+        return b''.join(stuffed_frame(0x88, ofs, CAPTURED_BOILER[ofs:ofs + 6])
+                        for ofs in range(0, 42, 6)) + frame(0x80, 0, bytes(6))
+
+    def test_stuffed_checksum_byte(self):
+        stream = self._captured_boiler_stream()
+        assert bytes.fromhex('880c173305000005af00af82') in stream
+
+        self.parser.feed(stream)
+
+        assert self.records == [(0x88, CAPTURED_BOILER)]
+        assert self.parser.stats['discarded_bytes'] == 0
+
+    def test_stuffing_split_across_reads(self):
+        for b in self._captured_boiler_stream():
+            self.parser.feed(bytes([b]))
+
+        assert self.records == [(0x88, CAPTURED_BOILER)]
+
+    def test_stuffed_af_followed_by_data_zero(self):
+        """Payload "af 00" is sent as "af 00 00": only the first 0x00 is stuffing."""
+        payload = bytes.fromhex('af0001020304')
+        self.parser.feed(stuffed_frame(0x84, 0, payload) + frame(0x80, 0, bytes(6)))
+
+        assert self.records == [(0x84, payload)]
+
+    def test_perl_89_18_exception_is_a_stuffed_frame(self):
+        """"89 18 01 af 00 de 00 00 00 ed af 82" from l4000-daemon.pl continues the config record."""
+        self.parser.feed(
+            b''.join(frame(0x89, ofs, bytes(6)) for ofs in range(0, 0x18, 6))
+            + bytes.fromhex('891801af00de000000edaf82')
+            + frame(0x8a, 0, bytes(6))
+        )
+
+        assert self.records == [(0x89, bytes(24) + bytes.fromhex('01afde000000'))]
