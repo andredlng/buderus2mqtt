@@ -634,7 +634,7 @@ class TestFrameParser:
         self.parser.feed(stream + frame(0x82, 0, bytes(6)))
 
         assert self.records == [(0x88, bytes(record))]
-        assert self.parser.stats['discarded_bytes'] == 0
+        assert self.parser.stats['lost_frames'] == 0
 
     def test_marker_bytes_inside_payload_fed_bytewise(self):
         record = bytearray(range(1, 43))
@@ -650,10 +650,11 @@ class TestFrameParser:
     def test_corrupt_frame_is_skipped(self):
         corrupt = bytearray(frame(0x81, 6, bytes(6)))
         corrupt[4] ^= 0xFF
-        self.parser.feed(frame(0x81, 0, bytes(6)) + bytes(corrupt) + frame(0x82, 0, bytes(6)))
+        self.parser.feed(frame(0x81, 0, bytes(6)) + bytes(corrupt)
+                         + frame(0x81, 12, bytes(6)) + frame(0x82, 0, bytes(6)))
 
-        assert self.records == [(0x81, bytes(6))]
-        assert self.parser.stats['discarded_bytes'] == 11
+        assert self.records == [(0x81, bytes(12))]
+        assert self.parser.stats['lost_frames'] == 1
 
     def test_no_hybrid_record_on_lost_payofs0(self):
         self.parser.feed(
@@ -683,7 +684,7 @@ class TestFrameParser:
         self.parser.feed(stream)
 
         assert self.records == [(0x88, CAPTURED_BOILER)]
-        assert self.parser.stats['discarded_bytes'] == 0
+        assert self.parser.stats['lost_frames'] == 0
 
     def test_stuffing_split_across_reads(self):
         for b in self._captured_boiler_stream():
@@ -707,3 +708,11 @@ class TestFrameParser:
         )
 
         assert self.records == [(0x89, bytes(24) + bytes.fromhex('01afde000000'))]
+
+    def test_end_of_cycle_block_is_not_a_lost_frame(self):
+        """Captured before zone 1 on every cycle: "af 82 a0 a4 af 82" after a frame ending in "af 02"."""
+        self.parser.feed(frame(0x9e, 0, bytes(6))[:-1] + b'\x02'
+                         + bytes.fromhex('af82a0a4af82') + frame(0x80, 0, bytes(6)))
+
+        assert self.records == [(0x9e, bytes(6))]
+        assert self.parser.stats['lost_frames'] == 0

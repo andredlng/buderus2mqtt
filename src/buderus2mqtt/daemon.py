@@ -403,7 +403,8 @@ class FrameParser:
         self.lastrec = 0
         self.recbuf = bytearray()
         self.prev_af = False
-        self.stats = {'blocks': 0, 'records': 0, 'discarded_bytes': 0}
+        self.junk = bytearray()
+        self.stats = {'blocks': 0, 'records': 0, 'lost_frames': 0}
 
     def _emit(self):
         if self.lastrec and len(self.recbuf):
@@ -428,19 +429,26 @@ class FrameParser:
             if be < 0:
                 # A frame completed by future bytes needs at most the last 10 bytes here.
                 if len(self.buf) > 10:
-                    self.stats['discarded_bytes'] += len(self.buf) - 10
+                    self.junk.extend(self.buf[:-10])
                     self.buf = self.buf[-10:]
                 break
 
-            # Normally only the marker's trailing byte from the previous frame
-            if be > 10:
-                self.stats['discarded_bytes'] += be - 10
+            self.junk.extend(self.buf[:be - 9])
             subblock = bytes(self.buf[be - 9:be])
             self.buf = self.buf[be + 1:]
 
             recnum = subblock[0]
             payofs = subblock[1]
             payload = subblock[2:8]
+
+            # Only discards that lost a frame (payload offset gap) matter. The controller
+            # sends a short non-frame block at the end of each cycle, which is harmless.
+            expected_ofs = len(self.recbuf) if recnum == self.lastrec else 0
+            if len(self.junk) > 1 and payofs != expected_ofs:
+                self.stats['lost_frames'] += 1
+                logger.warning('Lost frame before 0x%02x:%02x (expected offset 0x%02x), discarded %s',
+                               recnum, payofs, expected_ofs, self.junk.hex())
+            self.junk = bytearray()
 
             logger.debug('Block 0x%02x:%02d = %s', recnum, payofs, subblock.hex())
             self.stats['blocks'] += 1
@@ -497,9 +505,9 @@ def _serial_loop(stop):
             now = time.monotonic()
             if now - last_heartbeat >= 60:
                 logger.info('serial_loop heartbeat: %d bytes rx, %d blocks ok, %d records, '
-                            '%d bytes discarded, buf=%d',
+                            '%d lost frames, buf=%d',
                             rx_bytes, parser.stats['blocks'], parser.stats['records'],
-                            parser.stats['discarded_bytes'], len(parser.buf))
+                            parser.stats['lost_frames'], len(parser.buf))
                 last_heartbeat = now
 
             if not chunk:
