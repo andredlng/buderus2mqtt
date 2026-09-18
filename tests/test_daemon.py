@@ -5,6 +5,7 @@ import pytest
 import serial
 
 from buderus2mqtt.daemon import (
+    FrameParser,
     checksum,
     signed_byte,
     reclen,
@@ -564,3 +565,80 @@ class TestSerialLoopObservability:
 
         assert 'serial_loop heartbeat:' in caplog.text
         assert '0 bytes rx' in caplog.text
+
+
+
+# --- Frame parser ---
+
+
+def frame(recnum: int, payofs: int, payload: bytes) -> bytes:
+    block = bytes([recnum, payofs]) + payload
+    return block + bytes([checksum(list(block)), 0xAF, 0x82])
+
+
+class TestFrameParser:
+    def setup_method(self):
+        self.records = []
+        self.parser = FrameParser(lambda recnum, data: self.records.append((recnum, data)))
+
+    def test_record_assembly(self):
+        # Sample from the original Perl source
+        self.parser.feed(bytes.fromhex(
+            '810004022828' '2a2959af82'
+            '8106000064028000d0af82'
+            '810c2c3843000000a4af82'
+        ))
+        assert self.records == []
+
+        self.parser.feed(bytes.fromhex('820004021919266e9caf82'))
+        assert self.records == [
+            (0x81, bytes.fromhex('040228282a29' '000064028000' '2c3843000000')),
+        ]
+
+    def test_marker_bytes_inside_payload(self):
+        """Payload bytes 0xAF 0x02 / 0xAF 0x82 (e.g. a frozen runtime counter) must not drop the record."""
+        record = bytearray(range(1, 43))
+        record[13:15] = b'\xaf\x02'
+        record[26:28] = b'\xaf\x82'
+        stream = b''.join(frame(0x88, ofs, bytes(record[ofs:ofs + 6])) for ofs in range(0, 42, 6))
+
+        self.parser.feed(stream + frame(0x82, 0, bytes(6)))
+
+        assert self.records == [(0x88, bytes(record))]
+        assert self.parser.stats['discarded_bytes'] == 0
+
+    def test_marker_bytes_inside_payload_fed_bytewise(self):
+        record = bytearray(range(1, 43))
+        record[13:15] = b'\xaf\x82'
+        stream = b''.join(frame(0x88, ofs, bytes(record[ofs:ofs + 6])) for ofs in range(0, 42, 6))
+        stream += frame(0x82, 0, bytes(6))
+
+        for b in stream:
+            self.parser.feed(bytes([b]))
+
+        assert self.records == [(0x88, bytes(record))]
+
+    def test_corrupt_frame_is_skipped(self):
+        corrupt = bytearray(frame(0x81, 6, bytes(6)))
+        corrupt[4] ^= 0xFF
+        self.parser.feed(frame(0x81, 0, bytes(6)) + bytes(corrupt) + frame(0x82, 0, bytes(6)))
+
+        assert self.records == [(0x81, bytes(6))]
+        assert self.parser.stats['discarded_bytes'] == 11
+
+    def test_no_hybrid_record_on_lost_payofs0(self):
+        self.parser.feed(
+            frame(0x81, 0, bytes(6))
+            + frame(0x81, 6, bytes(6))
+            + frame(0x88, 6, bytes(6))  # boiler payofs=0 frame was lost
+            + frame(0x88, 12, bytes(6))
+            + frame(0x82, 0, bytes(6))
+        )
+
+        assert self.records == [(0x81, bytes(12))]
+
+    def test_flush_emits_pending_record(self):
+        self.parser.feed(frame(0x84, 0, bytes(6)) + frame(0x84, 6, bytes(6)))
+        self.parser.flush()
+
+        assert self.records == [(0x84, bytes(12))]

@@ -377,6 +377,88 @@ def serial_loop(stop):
 MAX_BUF = 2048
 
 
+def find_frame_marker(buf: bytearray) -> tuple[int, bool]:
+    """Find the first 0xAF 0x82 / 0xAF 0x02 marker preceded by a checksum-valid frame.
+
+    Payload bytes can contain the marker sequence (e.g. runtime counters), so a
+    marker alone is not enough to delimit a frame. Returns (index of 0xAF or -1, alt_marker).
+    """
+    for i in range(9, len(buf) - 1):
+        if buf[i] != 0xAF or buf[i + 1] not in (0x82, 0x02):
+            continue
+        if checksum(buf[i - 9:i - 1]) != buf[i - 1]:
+            continue
+        return i, buf[i + 1] == 0x02
+    return -1, False
+
+
+class FrameParser:
+    """Assembles records from the raw serial byte stream and hands them to on_record."""
+
+    def __init__(self, on_record):
+        self.on_record = on_record
+        self.buf = bytearray()
+        self.lastrec = 0
+        self.recbuf = bytearray()
+        self.stats = {'blocks': 0, 'records': 0, 'discarded_bytes': 0}
+
+    def _emit(self):
+        if self.lastrec and len(self.recbuf):
+            self.on_record(self.lastrec, bytes(self.recbuf))
+            self.stats['records'] += 1
+
+    def feed(self, chunk: bytes):
+        self.buf.extend(chunk)
+        if len(self.buf) > MAX_BUF:
+            self.buf = self.buf[-MAX_BUF:]
+
+        while True:
+            be, alt_marker = find_frame_marker(self.buf)
+
+            # Handle protocol exception: 0x89 0x18 with extra bytes
+            if be in (9, 10) and self.buf.startswith(b'\x89\x18'):
+                self.buf = self.buf[2:]
+                continue
+
+            if be < 0:
+                # A frame completed by future bytes needs at most the last 10 bytes here.
+                if len(self.buf) > 10:
+                    self.stats['discarded_bytes'] += len(self.buf) - 10
+                    self.buf = self.buf[-10:]
+                break
+
+            # Normally only the marker's trailing byte from the previous frame
+            if be > 10:
+                self.stats['discarded_bytes'] += be - 10
+            subblock = bytes(self.buf[be - 9:be])
+            self.buf = self.buf[be + 1:]
+
+            recnum = subblock[0]
+            payofs = subblock[1]
+            payload = subblock[2:8]
+
+            logger.debug('Block 0x%02x:%02d = %s', recnum, payofs, subblock.hex())
+            self.stats['blocks'] += 1
+
+            # New record or alt marker or 0x89/0x18 exception
+            if payofs == 0 or alt_marker or (recnum == 0x89 and payofs == 0x18):
+                self._emit()
+                self.recbuf = bytearray(payload)
+            elif recnum != self.lastrec:
+                # Record type changed without payofs=0 (lost frame). Emit the
+                # accumulated record and reset to prevent hybrid records.
+                self._emit()
+                self.recbuf = bytearray()
+            elif len(self.recbuf):
+                self.recbuf.extend(payload)
+
+            self.lastrec = recnum
+
+    def flush(self):
+        self._emit()
+        self.recbuf = bytearray()
+
+
 def _serial_loop(stop):
     port = config.serial_port
     baud = config.serial_baud
@@ -400,100 +482,34 @@ def _serial_loop(stop):
     )
 
     try:
-        buf = bytearray()
-        lastrec = 0
-        recbuf = bytearray()
+        parser = FrameParser(decode)
         last_heartbeat = time.monotonic()
-        stats = {'bytes': 0, 'blocks': 0, 'records': 0, 'checksum_errors': 0,
-                 'markers': 0, 'short_discards': 0}
-        hex_dumped = False
+        rx_bytes = 0
+        hex_sample = bytearray()
 
         while not stop():
             chunk = ser.read(132)
 
             now = time.monotonic()
             if now - last_heartbeat >= 60:
-                logger.info('serial_loop heartbeat: %d bytes rx, %d markers, %d blocks ok, '
-                            '%d checksum errors, %d short discards, %d records, buf=%d',
-                            stats['bytes'], stats['markers'], stats['blocks'],
-                            stats['checksum_errors'], stats['short_discards'],
-                            stats['records'], len(buf))
+                logger.info('serial_loop heartbeat: %d bytes rx, %d blocks ok, %d records, '
+                            '%d bytes discarded, buf=%d',
+                            rx_bytes, parser.stats['blocks'], parser.stats['records'],
+                            parser.stats['discarded_bytes'], len(parser.buf))
                 last_heartbeat = now
 
             if not chunk:
                 continue
-            stats['bytes'] += len(chunk)
-            buf.extend(chunk)
+            rx_bytes += len(chunk)
 
-            if not hex_dumped and stats['bytes'] >= 200:
-                logger.info('serial hex sample (first %d bytes of buf): %s',
-                            min(200, len(buf)), buf[:200].hex())
-                hex_dumped = True
+            if len(hex_sample) < 200:
+                hex_sample.extend(chunk[:200 - len(hex_sample)])
+                if len(hex_sample) == 200:
+                    logger.info('serial hex sample (first 200 bytes): %s', hex_sample.hex())
 
-            # Cap buffer to prevent unbounded growth from marker-less data
-            if len(buf) > MAX_BUF:
-                buf = buf[-MAX_BUF:]
+            parser.feed(chunk)
 
-            while True:
-                # Find block end marker 0xAF 0x82 or 0xAF 0x02
-                be = buf.find(b'\xaf\x82')
-                be2 = buf.find(b'\xaf\x02')
-                if be < 0 and be2 >= 0:
-                    be = be2
-                elif be >= 0 and be2 >= 0:
-                    be = min(be, be2)
-                alt_marker = (be == be2)
-
-                # Handle protocol exception: 0x89 0x18 with extra bytes
-                be3 = buf.find(b'\x89\x18')
-                if be in (9, 10) and be3 == 0:
-                    buf = buf[be3 + 2:]
-                    continue
-
-                if be < 0:
-                    break
-
-                stats['markers'] += 1
-
-                if be >= 9:
-                    subblock = bytes(buf[be - 9:be])
-                    buf = buf[be + 1:]
-
-                    block = list(subblock)
-                    payload = subblock[2:8]
-
-                    # Verify checksum
-                    cs = checksum(block)
-                    if cs != block[8]:
-                        logger.warning('Checksum error: %s rx=%02x calc=%02x', subblock.hex(), block[8], cs)
-                        stats['checksum_errors'] += 1
-                        continue
-
-                    recnum = block[0]
-                    payofs = block[1]
-
-                    logger.debug('Block 0x%02x:%02d = %s', recnum, payofs, subblock.hex())
-                    stats['blocks'] += 1
-
-                    # New record or alt marker or 0x89/0x18 exception
-                    if payofs == 0 or alt_marker or (recnum == 0x89 and payofs == 0x18):
-                        if lastrec and len(recbuf):
-                            decode(lastrec, bytes(recbuf))
-                            stats['records'] += 1
-                        recbuf = bytearray(payload)
-                    else:
-                        if len(recbuf):
-                            recbuf.extend(payload)
-
-                    lastrec = recnum
-                else:
-                    # Not enough data before marker, discard
-                    stats['short_discards'] += 1
-                    buf = buf[be + 2:]
-
-        # Decode any remaining record
-        if lastrec and len(recbuf):
-            decode(lastrec, bytes(recbuf))
+        parser.flush()
     finally:
         ser.close()
         logger.info('Serial port closed')
