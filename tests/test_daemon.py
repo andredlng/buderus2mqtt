@@ -219,7 +219,7 @@ class TestDecodeZone:
         assert data['hk2_sg'] == -56
 
 
-def make_water_record(rb0=0x01, rb1=0x01, ws=60, wi=55, rb4=0, rb5=0x01, rb6=0):
+def make_water_record(rb0=0x01, rb1=0x01, ws=60, wi=55, rb4=0, rb5=0x01, rb6=0, rb7=0):
     """Build a 12-byte water record."""
     rec = [0] * 12
     rec[0] = rb0
@@ -229,6 +229,7 @@ def make_water_record(rb0=0x01, rb1=0x01, ws=60, wi=55, rb4=0, rb5=0x01, rb6=0):
     rec[4] = rb4
     rec[5] = rb5
     rec[6] = rb6
+    rec[7] = rb7
     return bytes(rec)
 
 
@@ -258,6 +259,16 @@ class TestDecodeWater:
     def test_wrong_record_length(self, mock_send):
         decode_water(bytes(6))
         assert mock_send.call_count == 0
+
+    @patch('buderus2mqtt.daemon.send_data')
+    def test_external_error(self, mock_send):
+        decode_water(make_water_record(rb7=0x01))
+        assert mock_send.call_args[0][0]['ww_err'] == 'Externe Fehlermeldung'
+
+    @patch('buderus2mqtt.daemon.send_data')
+    def test_wf3_input_is_not_an_error(self, mock_send):
+        decode_water(make_water_record(rb6=0x02))
+        assert mock_send.call_args[0][0]['ww_err'] == ''
 
 
 def make_boiler_record(ks=70, ki=65, k1=60, k0=55, br=80):
@@ -427,6 +438,11 @@ class TestDecodeSolar:
         for _ in range(5):
             decode_solar(record)
         assert mock_send.call_count == 5
+
+    @patch('buderus2mqtt.daemon.send_data')
+    def test_short_record(self, mock_send):
+        decode_solar(bytes(9))
+        assert mock_send.call_count == 0
 
 
 # --- Error publishing via MQTT ---

@@ -194,7 +194,7 @@ def decode_water(record: bytes):
     if rb[0] & 0x80: err.append('Fehler in Inertanode')
     if rb[6] & 0x20: err.append('Betriebsartschalter: AUS')
     if rb[6] & 0x40: err.append('Betriebsartschalter: MANUELL')
-    if rb[6] & 0x02: err.append('Externe Fehlermeldung')  # rb[7] & 0x01 in original, keyed off w3
+    if rb[7] & 0x01: err.append('Externe Fehlermeldung')
 
     la = 1 if rb[1] & 0x01 else 0
     p0 = 1 if rb[5] & 0x01 else 0
@@ -321,6 +321,8 @@ def decode_solar(record: bytes):
     run_counters['solar'] = run + 1
 
     rb = list(record)
+    if not reclen('solar', -10, len(record)):
+        return
 
     ct = (rb[3] * 256 + rb[4]) / 10.0
     pu = rb[5]
